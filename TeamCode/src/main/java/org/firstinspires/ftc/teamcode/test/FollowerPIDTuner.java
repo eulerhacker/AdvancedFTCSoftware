@@ -13,7 +13,7 @@ import javax.sql.PooledConnection;
 
 @TeleOp (group="test")
 @Config
-public class HeadingPIDTuner extends LinearOpMode {
+public class FollowerPIDTuner extends LinearOpMode {
 
     public static double power = 0.5;
     public void runOpMode() throws InterruptedException {

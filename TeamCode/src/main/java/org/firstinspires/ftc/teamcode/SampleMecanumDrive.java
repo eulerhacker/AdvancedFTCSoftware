@@ -4,6 +4,7 @@ import android.util.Log;
 
 import com.acmerobotics.dashboard.FtcDashboard;
 import com.acmerobotics.dashboard.canvas.Canvas;
+import com.acmerobotics.dashboard.config.Config;
 import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 import com.qualcomm.hardware.bosch.BNO055IMU;
 import com.qualcomm.hardware.lynx.LynxModule;
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+@Config
 public class SampleMecanumDrive {
     FtcDashboard dashboard;
 
@@ -54,6 +56,7 @@ public class SampleMecanumDrive {
 
     public boolean updateHub2 = false;
     public Pose2d targetPoint = new Pose2d(0,0,0);
+    public double headingError = 0;
 
     public SampleMecanumDrive(HardwareMap hardwareMap) {
         dashboard = FtcDashboard.getInstance();
@@ -154,13 +157,17 @@ public class SampleMecanumDrive {
         motorPriorities.get(3).setTargetPower(powers[3]); //rf
     }
 
+    public double loopTime = 0;
     public void update() {
         long loopStart = System.nanoTime();
         if(loops==0) start=System.currentTimeMillis();
+
         loops++;
 
         getEncoders();
-        double loopTime = (System.nanoTime() - loopStart) / (double) 1e9;
+        updateHub2();
+
+        loopTime = (System.nanoTime() - loopStart) / (double) 1e9;
         double targetLoopLength = 0.01;
         double bestMotorUpdate = 1;
 
@@ -188,9 +195,14 @@ public class SampleMecanumDrive {
         }
 
         TelemetryPacket packet = new TelemetryPacket();
+
         packet.put("Loops", loops);
         packet.put("Loop speed", (double) ((System.currentTimeMillis() - start)) / loops);
         packet.put("Person:", "James");
+        packet.put("Heading Error", Math.toDegrees(headingError));
+        packet.put("Forward V Error", errorForwardVelocity);
+        packet.put("Left V Error", errorLeftVelocity);
+
         Canvas fieldOverlay = packet.fieldOverlay();
         fieldOverlay.strokeCircle(localizer.x, localizer.y, 9);
         fieldOverlay.strokeLine(localizer.x, localizer.y, localizer.x + 11*Math.cos(localizer.heading), localizer.y + 11*Math.sin(localizer.heading));
@@ -202,10 +214,6 @@ public class SampleMecanumDrive {
         dashboard.sendTelemetryPacket(packet);
 
         updateHub2 = false;
-        updateHub2();
-
-//        updateIntake();
-//        updateSlides();
     }
 
 
@@ -290,8 +298,13 @@ public class SampleMecanumDrive {
             double relErrorY = Math.sin(headingError) * error;
 
             double turn = Math.toDegrees(headingError) * 0.3 / 15; // 15deg / s
-            double forward = (relErrorX / error) * 0.5 / (1.0-Math.abs(turn)); // 0.5 max power forward accounting for turn
-            double left = (relErrorY / error) * 0.5 / (1.0-Math.abs(turn));
+            double forward = 0;
+            double left = 0;
+
+            if(error != 0){
+                forward = (relErrorX / error) * 0.5 / (1.0-Math.abs(turn));
+                left = (relErrorY / error) * 0.5 / (1.0-Math.abs(turn));
+            }
 
             double [] mp = new double[4];
             mp[0] = forward - left - turn;
@@ -303,6 +316,30 @@ public class SampleMecanumDrive {
         }
     }
 
+    public static double headingP=3;
+    public static double headingI=0.03;
+    public static double headingD=0.05;
+    public double headingIntegral=0;
+    public double lastHeading=0;
+    public double lastTargetHeading = 0;
+
+    public static double forwardP=0.03;
+    public static double forwardI=0.004;
+    public static double forwardD=0.005;
+    public double forwardIntegral=0;
+    public double lastForward=0;
+    public double lastTargetForwardVelocity = 0;
+
+    public static double leftP=0.04;
+    public static double leftI=0.004;
+    public static double leftD=0.04;
+    public double leftIntegral=0;
+    public double lastLeft=0;
+    public double lastTargetLeftVelocity = 0;
+
+
+    public double errorForwardVelocity;
+    public double errorLeftVelocity;
     public void followTrajectory(LinearOpMode opMode, Trajectory trajectory) {
         Pose2d targetPoint;
 
@@ -316,14 +353,24 @@ public class SampleMecanumDrive {
             double lastError = Math.sqrt(Math.pow(localizer.x - trajectory.points.get(trajectory.points.size()-1).x, 2) + Math.pow(localizer.y - trajectory.points.get(trajectory.points.size()-1).y, 2));
 
             double targetAngle = Math.atan2(targetPoint.y - localizer.y, targetPoint.x - localizer.x);
-            double headingError = targetAngle - localizer.heading;
+            headingError = targetAngle - localizer.heading;
 
             double relErrorX = Math.cos(headingError) * error;
             double relErrorY = Math.sin(headingError) * error;
 
             if(lastError < 8 && trajectory.points.size() < 100) {
-                headingError = trajectory.points.get(trajectory.points.size()-1).heading - localizer.heading;
+                targetAngle = trajectory.points.get(trajectory.points.size()-1).heading;
             }
+            double hDiff = targetAngle - lastTargetHeading;
+            while(Math.abs(hDiff) > Math.PI) {
+                hDiff -= Math.signum(hDiff) * 2 * Math.PI;
+            }
+            double expectedAngle = Math.signum(hDiff) * Math.toRadians(90) * loopTime + lastTargetHeading;
+            lastTargetHeading = expectedAngle;
+            if(Math.abs(targetAngle - expectedAngle) < Math.toRadians(5)) {
+                expectedAngle = targetAngle;
+            }
+            headingError = expectedAngle - localizer.heading;
 
             while(headingError > Math.PI) { // restrict to 180 -180
                 headingError -= 2 * Math.PI;
@@ -332,10 +379,50 @@ public class SampleMecanumDrive {
                 headingError += 2 * Math.PI;
             }
 
+            headingIntegral += headingError * loopTime;
+            double dHeadingError = (headingError - lastHeading) / loopTime;
+            lastHeading = headingError;
 
-            double turn = Math.min(Math.abs(headingError * 4.47 * targetPoint.speed), 0.6 * targetPoint.speed) * Math.signum(headingError); // Math.min(Math.abs(headingError * sensitivity), maxTurn)
-            double forward = (relErrorX / error) * targetPoint.speed * (1.0-Math.abs(turn)); // 0.5 max power forward accounting for turn
-            double left = (relErrorY / error) * targetPoint.speed * (1.0-Math.abs(turn));
+
+            double turn = headingError * headingP + headingIntegral * headingI + dHeadingError * headingD;
+
+//            double turn = Math.min(Math.abs(headingError * 4.47 * targetPoint.speed), 0.6 * targetPoint.speed) * Math.signum(headingError); // Math.min(Math.abs(headingError * sensitivity), maxTurn)
+
+            double targetForwardVelocity = 0;
+            double targetLeftVelocity = 0;
+
+            if(error != 0) {
+                double expectedTargetForwardVelocity = (relErrorX / error) * targetPoint.speed * (1.0 - Math.abs(turn)); // 0.5 max power forward accounting for turn
+                targetForwardVelocity = Math.signum(expectedTargetForwardVelocity - lastTargetForwardVelocity) * 20 * loopTime + lastTargetForwardVelocity;
+                if(Math.abs(targetForwardVelocity) - expectedTargetForwardVelocity < 2) {
+                    targetForwardVelocity = expectedTargetForwardVelocity;
+                }
+                lastTargetForwardVelocity = targetForwardVelocity;
+
+                double expectedTargetLeftVelocity = (relErrorY / error) * targetPoint.speed * (1.0 - Math.abs(turn));
+                targetLeftVelocity = Math.signum(expectedTargetLeftVelocity - lastTargetLeftVelocity) * 10 * loopTime + lastTargetLeftVelocity;
+                if(Math.abs(targetLeftVelocity) - expectedTargetLeftVelocity < 2) {
+                    targetLeftVelocity = expectedTargetLeftVelocity;
+                }
+                lastTargetLeftVelocity = targetLeftVelocity;
+            }
+
+
+            targetForwardVelocity = targetForwardVelocity * 54 * 0.9; // motor power to in/s
+            targetLeftVelocity = targetLeftVelocity * 40 * 0.9;
+
+            errorForwardVelocity =  targetForwardVelocity - localizer.relCurrentVel.x;
+            forwardIntegral += errorForwardVelocity * loopTime;
+            double dForwardError = (errorForwardVelocity - lastForward) / loopTime;
+            lastForward = errorForwardVelocity;
+
+            double errorLeftVelocity = targetLeftVelocity - localizer.relCurrentVel.y;
+            leftIntegral += errorLeftVelocity * loopTime;
+            double dLeftError = (errorLeftVelocity - lastLeft) / loopTime;
+            lastLeft = errorLeftVelocity;
+
+            double forward = errorForwardVelocity * forwardP + forwardIntegral * forwardI + dForwardError * forwardD;
+            double left = errorLeftVelocity * leftP + leftIntegral * leftI + dLeftError * leftD;
 
             double [] mp = new double[4];
             mp[0] = forward - left - turn;
@@ -346,5 +433,6 @@ public class SampleMecanumDrive {
             setMotorPowers(mp);
             trajectory.update(localizer.currentPos, localizer.relCurrentVel);
         }
+        setMotorPowers(new double[]{0,0,0,0});
     }
 }
